@@ -1,0 +1,1841 @@
+##------------------------------------------------------------------------------------------------------------------------------------------##
+library(tidyr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(forcats)
+library(scales)
+library(zoo)
+library(naniar)
+library(ggplot2)
+library(lattice)
+library(corrplot)
+library(ROSE)
+library(caret)
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####1. COMBINACIÓN DE DATOS####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##FLIGHTS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+flights <- read.csv("flights.csv",sep = ",")
+str(flights)
+oct2015 <- read.csv("T_ONTIME_REPORTING.csv",sep = ",")
+str(oct2015)
+
+#Cambiar nombres de variables en oct2015
+names(oct2015)[names(oct2015) == "DAY_OF_MONTH"] <- "DAY"
+names(oct2015)[names(oct2015) == "OP_UNIQUE_CARRIER"] <- "AIRLINE"
+names(oct2015)[names(oct2015) == "OP_CARRIER_FL_NUM"] <- "FLIGHT_NUMBER"
+names(oct2015)[names(oct2015) == "TAIL_NUM"] <- "TAIL_NUMBER"
+names(oct2015)[names(oct2015) == "ORIGIN"] <- "ORIGIN_AIRPORT"
+names(oct2015)[names(oct2015) == "DEST"] <- "DESTINATION_AIRPORT"
+names(oct2015)[names(oct2015) == "CRS_DEP_TIME"] <- "SCHEDULED_DEPARTURE"
+names(oct2015)[names(oct2015) == "DEP_TIME"] <- "DEPARTURE_TIME"
+names(oct2015)[names(oct2015) == "DEP_DELAY"] <- "DEPARTURE_DELAY"
+names(oct2015)[names(oct2015) == "CRS_ARR_TIME"] <- "SCHEDULED_ARRIVAL"
+names(oct2015)[names(oct2015) == "ARR_TIME"] <- "ARRIVAL_TIME"
+names(oct2015)[names(oct2015) == "ARR_DELAY"] <- "ARRIVAL_DELAY"
+names(oct2015)[names(oct2015) == "CANCELLATION_CODE"] <- "CANCELLATION_REASON"
+names(oct2015)[names(oct2015) == "CRS_ELAPSED_TIME"] <- "SCHEDULED_TIME"
+names(oct2015)[names(oct2015) == "ACTUAL_ELAPSED_TIME"] <- "ELAPSED_TIME"
+names(oct2015)[names(oct2015) == "CARRIER_DELAY"] <- "AIRLINE_DELAY"
+names(oct2015)[names(oct2015) == "NAS_DELAY"] <- "AIR_SYSTEM_DELAY"
+
+#organizar las variables igual que en flights
+column_order_flights <- names(flights)
+# Reorganizar las columnas de oct2015 para que coincidan con flights
+oct2015 <- oct2015[, column_order_flights, drop = FALSE]
+
+#tipos de las variables igual que en flights
+#Obtener los tipos de datos de las columnas de flights
+column_types_flights <- sapply(flights, class)
+#Aplicar los tipos de datos a las columnas correspondientes en oct2015
+oct2015 <- data.frame(Map(function(x, y) as(x, y), oct2015, column_types_flights))
+
+flights_combined<- rbind(flights, oct2015)
+
+##TRANSFORMACIONES##
+#DATE
+flights_combined$DATE <- as.Date(paste(flights_combined$YEAR, flights_combined$MONTH, flights_combined$DAY, sep = "-"))
+head(flights_combined)
+
+#SCHEDULED_DEPARTURE
+flights_combined$SCHEDULED_DEPARTURE <- sprintf("%04d", flights_combined$SCHEDULED_DEPARTURE)
+
+# Separar en hour y mins
+flights_combined$hour <- as.numeric(substr(flights_combined$SCHEDULED_DEPARTURE, 1, nchar(flights_combined$SCHEDULED_DEPARTURE) - 2))
+flights_combined$mins <- as.numeric(substr(flights_combined$SCHEDULED_DEPARTURE, nchar(flights_combined$SCHEDULED_DEPARTURE) - 1, nchar(flights_combined$SCHEDULED_DEPARTURE)))
+
+#crear TIME
+flights_combined$TIME <- ifelse(flights_combined$mins > 30, flights_combined$hour + 1, flights_combined$hour)
+
+flights_combined <- arrange(flights_combined, TIME)
+
+#cambiar las horas 24 a 00 del dia siguiente
+initial_state <- flights_combined
+
+#DATE y TIME
+flights_combined$DATE <- ifelse(flights_combined$TIME == 24, flights_combined$DATE + 1, flights_combined$DATE)
+flights_combined$TIME2 <- ifelse(flights_combined$TIME != 24, flights_combined$TIME, 0)
+
+flights_combined$DATE<-as.Date(flights_combined$DATE, origin = "1970-01-01")
+
+modified_state <- flights_combined
+
+##WEATHER##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+weather2015 <- read.csv("CHICAGO O'HARE INTERNATIO... 2015-01-01 to 2015-12-31.csv",sep = ",")
+str(weather2015)
+weather2016 <- read.csv("CHICAGO O'HARE INTERNATIO... 2016-01-01 to 2016-01-31.csv",sep = ",")
+weather <- rbind(weather2015, weather2016)
+
+##TRANSFORMACIONES##
+#separar datetime en date y timelarge
+weather <- separate(weather, datetime, into = c("date", "timelarge"), sep = "T")
+#extraer de timelarge la hora para crear time
+weather$time <- as.numeric(sub("^0*([0-9]+).*", "\\1", weather$timelarge))#elimina ceros a la izquierda,nos quedamos con grupo de 1 o + digitos del 0 al 9
+
+#crear variable airport
+weather$airport <- "ORD"
+
+#exportar para combinarlos en Python
+write.csv(weather, file = "weather.csv", row.names = FALSE)
+write.csv(flights_combined, file = "flights_transformed.csv", row.names = FALSE)
+
+str(flights)
+str(weather)
+
+###COMBINAR WEATHER Y FLIGHTS_TRANSFORMED EN PYTHON###
+##FLIGHTS Y WEATHER COMBINADOS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+data <- read.csv("data_combined.csv",sep = ",")
+nrow(data) #6305244
+ncol(data) #63
+
+#convertir tipos de las variables
+data$DATE <- as.Date(data$DATE, format = "%Y-%m-%d")
+data$date <- as.Date(data$date, format = "%Y-%m-%d")  
+data$precipprob <- as.integer(data$precipprob)
+data$uvindex <- as.integer(data$uvindex)
+data$time <- as.integer(data$time)
+
+str(data)
+summary(data)
+
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####2. TRANSFORMACIÓN####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+#ACORTAR EL CONJUNTO DE DATOS
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#10 aeropuertos más frecuentes
+top10_airports <- names(sort(table(data$ORIGIN_AIRPORT), decreasing = TRUE)[1:10])
+
+#Ordenar ORIGIN_AIRPORT de mayor a menor frecuencia
+data$ORIGIN_AIRPORT <- factor(data$ORIGIN_AIRPORT, levels = top10_airports)
+
+#grafico
+ggplot(data[data$ORIGIN_AIRPORT %in% top10_airports, ], aes(x = ORIGIN_AIRPORT)) +
+  geom_bar() +
+  labs(title = "Top 10 Aeropuertos más frecuentes", x = "Aeropuerto de Origen", y = "Frecuencia") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_minimal() #Most frequent airport is ATL #The second most frequent is ORD
+
+count <- length(grep("ORD", data$ORIGIN_AIRPORT)) 
+count #numero de filas con ORD
+
+#Choose ORD airport to shorten the dataset
+dataORD<-subset(data,ORIGIN_AIRPORT=="ORD")
+str(data)
+summary(data)
+
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####3 ANALITICA DESCRIPTIVA####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+#Diverted, cancelled, delayed, on time
+data$flight_status <- ifelse(data$DIVERTED == 1, "Diverted",
+                             ifelse(data$CANCELLED == 1, "Cancelled",
+                                    ifelse(data$ARRIVAL_DELAY >= 15, "Delayed", "On Time")))
+##US DOT considera Delayed cuando Arrival Delay>15 mins
+
+#en %
+percentage_data <- data %>%
+  group_by(flight_status) %>%
+  summarize(percentage = n() / nrow(data) * 100)
+
+ggplot(percentage_data, aes(x = flight_status, y = percentage, fill = flight_status)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribución de estados de vuelos",
+       x = "Estado del vuelo",
+       y = "Porcentaje") +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            position = position_stack(vjust = 0.5))
+
+#Tipos de delays
+#total mins de cada tipo de delay
+delay_total_mins <- colSums(data[, c("AIR_SYSTEM_DELAY", "SECURITY_DELAY", "AIRLINE_DELAY", "LATE_AIRCRAFT_DELAY", "WEATHER_DELAY")], na.rm = TRUE)
+
+#nuevo conjunto de datos
+delay_percentage_data <- data.frame(
+  delay_type = names(delay_total_mins),
+  percentage = delay_total_mins / sum(delay_total_mins) * 100)
+
+#grafico
+ggplot(delay_percentage_data, aes(x = delay_type, y = percentage, fill = delay_type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribución de Minutos de Delay por Tipo", x = "Tipo de Delay", y = "Porcentaje") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), vjust = -0.5)
+
+##AEROPUERTO CHICAGO
+
+##grafico
+dataORD$flight_status <- ifelse(dataORD$DIVERTED == 1, "Diverted",
+                                ifelse(dataORD$CANCELLED == 1, "Cancelled",
+                                       ifelse(dataORD$ARRIVAL_DELAY >= 15, "Delayed", "On Time")))
+# En %
+percentage_data <- dataORD %>%
+  group_by(flight_status) %>%
+  summarize(percentage = n() / nrow(dataORD) * 100)
+
+ggplot(percentage_data, aes(x = flight_status, y = percentage, fill = flight_status)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribución de estados de vuelos para el aeropuerto de Chicago",
+       x = "Estado del vuelo",
+       y = "Porcentaje") +
+  scale_fill_brewer(palette = "Pastel1") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), vjust = -0.5)
+
+##grafico
+delay_total_mins <- colSums(dataORD[, c("AIR_SYSTEM_DELAY", "SECURITY_DELAY", "AIRLINE_DELAY", "LATE_AIRCRAFT_DELAY", "WEATHER_DELAY")], na.rm = TRUE)
+
+delay_percentage_data <- data.frame(
+  delay_type = names(delay_total_mins),
+  percentage = delay_total_mins / sum(delay_total_mins) * 100)
+
+ggplot(delay_percentage_data, aes(x = delay_type, y = percentage, fill = delay_type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Distribución de Minutos de Delay por Tipo para el aeropuerto de", x = "Tipo de Delay", y = "Porcentaje") +
+  scale_fill_brewer(palette = "Set3") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)), vjust = -0.5)
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####TRANSFORMACIÓN (CONT)####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##ELIMINAR VARIABLES NO UTILES PARA EL MODELO##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+dataORD <- dataORD %>%
+  select(-TAIL_NUMBER, -WHEELS_OFF, -SCHEDULED_TIME, -AIR_TIME, -WHEELS_ON, 
+         -TAXI_IN, -SECURITY_DELAY, -AIRLINE_DELAY, -LATE_AIRCRAFT_DELAY, -hour, -mins, 
+         -TIME, -date, -solarradiation, -solarenergy, -uvindex, -severerisk, -time, -airport) %>%
+  rename(TIME = TIME2)
+
+##CAMBIAR TIPOS DE LAS VARIABLES##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+str(dataORD)
+library(dplyr)
+
+dataORD <- mutate(dataORD, ORIGIN_AIRPORT = as.character(ORIGIN_AIRPORT))
+int_columns <- c("DEPARTURE_TIME", "DEPARTURE_DELAY", "TAXI_OUT", "ARRIVAL_TIME", "ARRIVAL_DELAY", "AIR_SYSTEM_DELAY", "WEATHER_DELAY", "winddir")
+dataORD[int_columns] <- lapply(dataORD[int_columns], as.integer)
+dataORD$DIVERTED <- as.factor(dataORD$DIVERTED)
+dataORD$CANCELLED <- as.factor(dataORD$CANCELLED)
+dataORD$precipprob <- as.factor(dataORD$precipprob)
+#dataORD$flight_status<-as.factor(dataORD$flight_status)
+
+str(dataORD)
+summary(dataORD)
+
+##VALORES FALTANTES##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##VARIABLES NUMÉRICAS##
+dataORD2 <- dataORD %>% 
+  select(everything()) 
+# Visualize missing data in numerical variables
+char_vars <- sapply(dataORD2, is.character)
+data_num <- dataORD2[!char_vars]
+gg_miss_var(data_num)
+
+#take away NAs
+#weather delay (target)-->NA:vuelo ok/vuelo cancelled o diverted; 0: delayed other reason; quiero weather delay>0
+#WEATHER DELAY VACIO Y NO CANCELLED-->0
+dataORD2$WEATHER_DELAY[is.na(dataORD2$WEATHER_DELAY) & dataORD2$CANCELLED == 0] <- 0
+#WEATHER DELAY VACIO Y CANCELADO Y CANCELLATION REASON=B, MAXIMO TIEMPO DE WEATHER PARA QUE SE CANCELE-->IMPUTAR EN WEATHER DELAY
+dataORD2$WEATHER_DELAY <- ifelse(is.na(dataORD2$WEATHER_DELAY) & dataORD2$CANCELLED == 1 & dataORD2$CANCELLATION_REASON == "B", 180, dataORD2$WEATHER_DELAY)
+#CANCELADOS, NO POR WEATHER, QUITARLOS 
+dataORD2 <- dataORD2[!(dataORD2$CANCELLED == 1 & dataORD2$CANCELLATION_REASON %in% c("A", "C", "D")), ]
+#QUITAR DIVERTED
+dataORD2 <- dataORD2[dataORD2$DIVERTED != 1, ]
+gg_miss_var(dataORD2)
+
+#air system delay-->ELIMINAR-->JUSTIFICAR #otro tipo de delay, out of scope
+dataORD2 <- dataORD2[!is.na(dataORD2$AIR_SYSTEM_DELAY), ] 
+#windgust-->NA represent absence of data when the criteria for a wind gust is not met-->PONER 0
+# Reemplazar NA en la variable windgust con 0 en dataORD2
+dataORD2$windgust <- ifelse(is.na(dataORD2$windgust), 0, dataORD2$windgust)
+#arrival_delay, arrival_time, taxi_out, departure_time, departure_delay-->tienen NA cuando los vuelos fueron cancelados; 
+#eliminar los NA-->EN GRAFICO ( NO PREDIGO CANCELLED )
+
+##VARIABLES CATEGÓRICAS##
+#missing in character variables
+char_vars <- sapply(dataORD2, is.character)
+empty_char_vars <- data.frame(
+  Variable = names(dataORD2)[char_vars],
+  EmptyCount = sapply(dataORD2[, char_vars], function(x) sum(is.na(x) | nchar(x) == 0))
+)
+char_vars_with_empty_values <- empty_char_vars[empty_char_vars$EmptyCount > 0, ]
+print(char_vars_with_empty_values)
+#CANCELLATION_REASON -->si no se cancela, no tiene cancellation reason
+dataORD2$CANCELLATION_REASON <- ifelse(dataORD2$CANCELLED == 0 & dataORD2$CANCELLATION_REASON == "", "Not cancelled", dataORD2$CANCELLATION_REASON)
+#si cancelado y vacio-->"Other"
+
+#preciptype--> Reemplazar los valores vacios en 'preciptype' con 'no precip' cuando 'precip' sea igual a 0
+dataORD2$preciptype[dataORD2$preciptype == "" & dataORD2$precip == 0] <- "No precip"
+
+##CREAR LA VARIABLE OBJETIVO##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#predicción de retrasos en la salida de vuelos a partir de condiciones climáticas en el aeropuerto de origen
+dataORD2$w_delayed <- factor(ifelse(dataORD2$WEATHER_DELAY > 15, 1, 0), levels = c(0, 1)) #para crear la variable target
+str(dataORD2) #target variable es de tipo factor con 2 niveles
+#puede ser que delay=1 y la variable flight_status aparezca como On Time, eso es porque hubo
+#retraso en salida>15, pero retraso en llegada<15 (flight_status considera On Time cuando retraso llegada<15)
+
+ggplot(dataORD2, aes(x = w_delayed)) +
+  geom_bar() +
+  labs(title = "Distribución de la variable 'w_delayed'",
+       x = "Weather Delay",
+       y = "Frecuencia") +
+  theme_minimal()
+
+prop.table(table(dataORD2$w_delayed))#HAY UN 9,1% de la clase positiva, DATASET IMBALANCED
+
+
+##CAMBIAR TIPOS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+str(dataORD2)
+dataORD2$ELAPSED_TIME <- as.integer(dataORD2$ELAPSED_TIME)
+dataORD2$WEATHER_DELAY <- as.integer(dataORD2$WEATHER_DELAY)
+
+
+
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####4. ANALÍTICA VISUAL####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##TABLA DE ESTADISTICOS BASICOS## 
+##------------------------------------------------------------------------------------------------------------------------------------------##
+exclude_vars <- c("YEAR", "MONTH", "DAY", "DAY_OF_WEEK", "FLIGHT_NUMBER", "TIME", "timelarge") #variables que no tiene sentido incluir
+numeric_data <- dataORD2[, !(names(dataORD2) %in% exclude_vars) & sapply(dataORD2, is.numeric)] #el resto de numericas
+#moda
+calculate_mode <- function(x) {
+  unique_values <- na.omit(x)
+  table_values <- table(unique_values)
+  mode_value <- as.numeric(names(table_values)[table_values == max(table_values)])
+  return(mode_value)
+}
+#estadisticos resumen
+summary_stats <- apply(numeric_data, 2, function(x) c(
+  Mínimo = min(x, na.rm = TRUE),
+  Máximo = max(x, na.rm = TRUE),
+  Media = mean(x, na.rm = TRUE),
+  Mediana = median(x, na.rm = TRUE),#cuartil 2
+  Cuartil_1 = quantile(x, 0.25, na.rm = TRUE),
+  Cuartil_3 = quantile(x, 0.75, na.rm = TRUE),
+  Moda = calculate_mode(x),
+  Desviación_Estándar = sd(x, na.rm = TRUE),
+  Rango = max(x, na.rm = TRUE) - min(x, na.rm = TRUE)
+))
+summary_stats <- as.data.frame(t(summary_stats))
+print(summary_stats)
+
+##HISTOGRAMAS/DISTRIBUCIONES##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+##IN MINS## deberian estar todos en la misma escala? Normalizar?
+selected_vars <- c("DEPARTURE_DELAY", "TAXI_OUT", "ARRIVAL_DELAY", "AIR_SYSTEM_DELAY")
+dataORD2_cleaned <- dataORD2[complete.cases(dataORD2[, selected_vars]), ]
+
+plots <- lapply(selected_vars, function(variable) {
+  ggplot(dataORD2_cleaned, aes(x = !!as.name(variable))) +
+    geom_histogram(binwidth = 5, fill = "lightblue", color = "black", alpha = 0.7) +
+    labs(title = paste("Histograma de", variable),
+         x = variable,
+         y = "Frecuencia") +
+    theme_minimal()+
+    theme(axis.text.x = element_text(size=7,angle = 45, hjust = 1), 
+          axis.text.y=element_text(size=7),
+          plot.title = element_text(size = 7),
+          axis.title=element_text(size=7))
+})
+grid.arrange(grobs = plots, ncol = 2, widths = c(8, 8))
+
+plots[[1]]
+plots[[2]]
+plots[[3]]
+plots[[4]]
+
+dataORD2$WEATHER_DELAY <- pmin(dataORD2$WEATHER_DELAY, 180)
+
+hist(dataORD2$WEATHER_DELAY, 
+     main = "Histograma de WEATHER_DELAY", 
+     xlab = "WEATHER_DELAY", 
+     ylab = "Frecuencia",
+     col = "lightblue",
+     xlim = c(0, 180),
+     xaxt = "n")  # Eliminar las etiquetas con los valores en el eje X
+
+# Personalizar los marcadores del eje X para mostrar etiquetas de valores en intervalos de uno en uno
+axis(side = 1, at = seq(0, 180, by = 1), labels = seq(0, 180, by = 1), cex.axis = 0.5)
+
+#zoom en 100
+hist(dataORD2$WEATHER_DELAY, 
+     main = "Histograma de WEATHER_DELAY", 
+     xlab = "WEATHER_DELAY", 
+     ylab = "Frecuencia",
+     col = "lightblue",
+     xlim = c(0, 100),
+     xaxt = "n")  # Eliminar las etiquetas con los valores en el eje X
+
+# Personalizar los marcadores del eje X para mostrar etiquetas de valores en intervalos de uno en uno
+axis(side = 1, at = seq(0, 100, by = 1), labels = seq(0, 100, by = 1), cex.axis = 0.5)
+
+##ggplot2
+hist_weather_delay <- ggplot(dataORD2, aes(x = WEATHER_DELAY)) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black", alpha = 0.7) +
+  labs(title = "Histograma de WEATHER_DELAY",
+       x = "WEATHER_DELAY",
+       y = "Frecuencia") +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, max(dataORD2$WEATHER_DELAY, na.rm = TRUE), by = 5)) +
+  theme(axis.text.x = element_text(size = 7, angle = 45, hjust = 1), 
+        axis.text.y = element_text(size = 7),
+        plot.title = element_text(size = 7),
+        axis.title = element_text(size = 7))
+# Imprimir el gráfico
+print(hist_weather_delay)
+
+
+##IN DEGREES##
+variables_temperatura <- c("temp", "feelslike", "dew")
+plots_temperatura <- list()
+
+for (variable in variables_temperatura) {
+  plot <- ggplot(dataORD2, aes(x = !!as.name(variable))) +
+    geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+    labs(title = paste("Histograma de", variable),
+         x = variable, y = "Frecuencia") +
+    theme_minimal()
+  
+  plots_temperatura[[variable]] <- plot
+}
+grid.arrange(grobs = plots_temperatura, ncol = 2)
+
+plots_temperatura[[1]]
+plots_temperatura[[2]]
+plots_temperatura[[3]]
+
+##IN %##cambiar cloudcover a categorica o mejor no para poder ver correls y construir nueva variable?
+ggplot(dataORD2, aes(x = humidity)) +
+  geom_histogram(binwidth = 5, fill = "lightblue", color = "black") +
+  labs(title = "Histograma de humidity",
+       x = "humidity",
+       y = "Frecuencia")+ theme_minimal()
+
+#CLOUDCOVER
+intervalos <- c(0, 25, 50, 75, 100)
+etiquetas <- c("Sin nubes", "Pocas nubes", "Nublado", "Muy nublado")
+dataORD2$cloudcover_categorico <- cut(dataORD2$cloudcover, breaks = intervalos, labels = etiquetas, include.lowest = TRUE)
+head(dataORD2$cloudcover_categorico)
+
+ggplot(dataORD2, aes(x = cloudcover_categorico)) +
+  geom_bar(fill = "lightblue", color = "black") +
+  labs(title = "Distribución de cloudcover",
+       x = "cloudcover",
+       y = "Frecuencia")+theme_minimal()
+
+##IN CM## -->FILTRAR Y QUITAR LOS 0
+data_filtered <- dataORD2[dataORD2$snow > 0 & dataORD2$snowdepth > 0, ]
+
+ggplot(data_filtered, aes(x = snow)) +
+    geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+    labs(title = paste("Histograma de snow"),
+         x = "", y = "Frecuencia") +
+    theme_minimal()
+
+min_snow <- floor(min(data_filtered$snow))
+max_snow <- ceiling(max(data_filtered$snow))
+
+# Crear un histograma para la variable snow con intervalos de uno en uno en el eje X
+ggplot(data_filtered, aes(x = snow)) +
+  geom_histogram(binwidth = 1, fill = "lightblue", color = "black") +
+  scale_x_continuous(breaks = seq(min_snow, max_snow, by = 1)) +
+  labs(title = "Histograma de snow",
+       x = "snow",
+       y = "Frecuencia") +
+  theme_minimal()
+
+
+ggplot(data_filtered, aes(x = snowdepth)) +
+  geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+  labs(title = paste("Histograma de snowdepth"),
+       x = "snowdepth", y = "Frecuencia") +
+  theme_minimal()
+
+
+##IN KPH## -->QUITAR LOS 0
+variables_viento <- c("windgust", "windspeed")
+data_filtered$windgust <- ifelse(is.na(data_filtered$windgust), 0, data_filtered$windgust)
+data_filtered <- data_filtered[data_filtered$windgust > 0 & data_filtered$windspeed > 0, ]
+
+plots_viento <- list()
+for (variable in variables_viento) {
+  plot <- ggplot(data_filtered, aes(x = !!as.name(variable))) +
+    geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+    labs(title = paste("Histograma de", variable),
+         x = variable, y = "Frecuencia") +
+    theme_minimal()
+  
+  plots_viento[[variable]] <- plot
+}
+grid.arrange(grobs = plots_viento, ncol = 2)
+
+plots_viento[[1]]
+plots_viento[[2]]
+
+##IN MM## -->QUITAR 0
+data_filtered <- data_filtered[data_filtered$precip > 0, ]
+histogram_precip <- ggplot(data_filtered, aes(x = precip)) +
+  geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+  labs(title = "Histograma de precip",
+       x = "precip", y = "Frecuencia") +
+  #scale_y_log10() +  
+  theme_minimal()
+print(histogram_precip)
+
+##IN KM## -->QUE SE CONSIDERA VISIBLE, MAX VISIBILITY AT CHICAGO ORD 50KM
+histogram_visibility <- ggplot(dataORD2, aes(x = visibility)) +
+  geom_histogram(fill = "lightblue", color = "black", bins = 30) +
+  labs(title = "Histograma de visibility",
+       x = "visibility", y = "Frecuencia") +
+  #scale_y_log10() + 
+  theme_minimal()
+print(histogram_visibility)
+
+#pie
+dataORD2$categoria_visibility <- cut(dataORD2$visibility, 
+                                     breaks = c(0, 4, 8, 12, 16, Inf),
+                                     labels = c("0-4", "4-8", "8-12", "12-16", ">16"))
+
+# Calcular la tabla de frecuencia y convertir a data.frame
+tabla_frecuencia <- as.data.frame(table(dataORD2$categoria_visibility))
+colnames(tabla_frecuencia) <- c("Categoria", "Frecuencia")
+
+colors <- c("#deebf7", "#c6dbef", "#9ecae1", "#6baed6", "#3182bd")
+
+# Crear el gráfico de pastel
+pie_chart <- ggplot(tabla_frecuencia, aes(x = "", y = Frecuencia, fill = Categoria)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  labs(title = "Distribución de visibility (in km)") +
+  scale_fill_manual(values = colors) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        plot.title = element_text(size = 14, hjust = 0.5),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 10))
+
+# Imprimir el gráfico
+print(pie_chart)
+
+##CATEGORICAS## 
+#preciptype-->MUCHOS NO PRECIP, LOS QUITO
+dataORD2_preciptype <- subset(dataORD2, preciptype != "No precip")
+
+ggplot(dataORD2_preciptype, aes(x = preciptype, fill = preciptype)) +
+  geom_bar(color = "black") +  # Establecer el color del borde de las barras como negro
+  labs(title = "Distribución de preciptype",
+       x = "preciptype",
+       y = "Conteo") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_minimal() +
+  scale_fill_manual(values = c("rain" = "blue", "rain,snow" = "gray", "snow" = "white"))
+
+
+#conditions
+# Count the frequency of each weather condition and select the top N conditions
+top_conditions <- dataORD2 %>%
+  group_by(conditions) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count)) %>%
+  slice(1:6) #6 weather conditions
+
+custom_colors <- c("Clear" = "#aec6cf", 
+                   "Snow, Rain, Overcast" = "#808080", 
+                   "Snow, Overcast" = "#FFFFFF", 
+                   "Rain, Overcast" = "#6363ac",
+                   "Overcast" = "#929591",
+                   "Partly cloudy" = "#d3d3d3")
+
+ggplot(top_conditions, aes(x = fct_reorder(conditions, Count), y = Count, fill = conditions)) + 
+  geom_bar(stat = "identity", color = "black") +
+  coord_flip() +  # Horizontal bars for better readability
+  labs(title = "Histograma de conditions",
+       x = "conditions",
+       y = "Frequency") + 
+  theme_minimal() +
+  scale_fill_manual(values = custom_colors)
+
+
+#icon
+custom_colors <- c("clear-night" = "#000080",       # Azul oscuro
+                   "clear-day" = "#87CEEB",        # Azul claro
+                   "snow" = "#FFFFFF",             # Blanco
+                   "rain" = "#4682B4",             # Azul oscuro
+                   "fog" = "#A9A9A9",              # Gris claro
+                   "cloudy" = "#696969",           # Gris oscuro
+                   "partly-cloudy-night" = "#191970", # Otro azul oscuro
+                   "partly-cloudy-day" = "#B0C4DE") # Azul claro grisáceo
+
+ggplot(dataORD2, aes(x = icon, fill = icon)) +
+  geom_bar(color = "black") +  # Agregar borde negro
+  scale_fill_manual(values = custom_colors) +
+  labs(title = "Distribución de icon",
+       x = "icon",
+       y = "Conteo") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+##SERIES TEMPORALES##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#-->QUITAR 2015, MIRAR DATOS NOVIEMBRE
+weather_vars <- c('temp', 'feelslike', 'dew', 'humidity', 'precip', 'snow')
+#time series plots for each weather variable
+plots <- lapply(weather_vars, function(var) {
+  ggplot(dataORD2, aes(x = DATE, y = !!as.name(var))) +
+    geom_line() +
+    labs(title = paste("Serie temporal de", var),
+         x = "Fecha",
+         y = var)+theme_minimal()
+})
+grid.arrange(grobs = plots, ncol = 2)
+plots[[1]]
+plots[[2]]
+plots[[3]]
+plots[[4]]
+plots[[5]]
+plots[[6]]
+
+weather_vars2 <- c('snowdepth', 'windgust', 'windspeed', 'winddir', 'cloudcover', 'visibility')
+#time series plots for each weather variable
+plots <- lapply(weather_vars2, function(var) {
+  ggplot(dataORD2, aes(x = DATE, y = get(var))) +
+    geom_line() +
+    labs(title = paste("Serie temporal de", var),
+         x = "Fecha",
+         y = var)+theme_minimal()
+})
+grid.arrange(grobs = plots, ncol = 2)
+plots[[1]]
+plots[[2]]
+plots[[3]]
+plots[[4]]
+plots[[5]]
+plots[[6]]
+
+
+#time series plots cloud cover y visibility suavizados (4 valores por mes)
+#dataORD2$date <- as.Date(with(dataORD2, paste(YEAR, MONTH, DAY, sep = "-")))
+# Calcular el número de semana dentro del mes
+dataORD2$week_in_month <- as.integer(format(dataORD2$DATE, "%d")) %/% 7 + 1
+
+data_summary <- dataORD2 %>%
+  group_by(YEAR, MONTH, week_in_month) %>%
+  summarise(mean_cloudcover = mean(cloudcover),
+            mean_visibility = mean(visibility, na.rm = TRUE)) # Añadir na.rm = TRUE para manejar NA
+
+# Obtener todos los primeros días de cada mes en tus datos
+all_month_starts <- unique(floor_date(dataORD2$DATE, "month"))
+
+# Gráfico de series temporales para la media semanal de cloudcover
+ggplot(data_summary, aes(x = as.Date(paste(YEAR, MONTH, week_in_month, sep = "-")))) +
+  geom_line(aes(y = mean_cloudcover, color = "Cloudcover")) +
+  labs(title = "Serie temporal de cloudcover",
+       x = "Fecha",
+       y = "Media semanal de cloudcover") +
+  scale_color_manual(values = c("cloudcover" = "black")) +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 90, hjust = 1, size = 8)) +
+  scale_x_date(breaks = all_month_starts, labels = month(all_month_starts, label = TRUE))
+
+# Gráfico de series temporales para la media semanal de visibility
+ggplot(data_summary, aes(x = as.Date(paste(YEAR, MONTH, week_in_month, sep = "-")))) +
+  geom_line(aes(y = mean_visibility, color = "Visibility")) +
+  labs(title = "Serie temporal de visibility",
+       x = "Fecha",
+       y = "Media semanal de visibility") +
+  scale_color_manual(values = c("Visibility" = "black")) +
+  theme_minimal() +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 90, hjust = 1, size = 8)) +
+  scale_x_date(breaks = all_month_starts, labels = month(all_month_starts, label = TRUE))
+
+
+##GRÁFICOS DE DISPERSIÓN##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+##DEPARTURE DELAY VS. ARRIVAL DELAY##
+correlation <- cor(dataORD2_cleaned$DEPARTURE_DELAY, dataORD2_cleaned$ARRIVAL_DELAY, use = "complete.obs")
+plot(dataORD2_cleaned$DEPARTURE_DELAY, dataORD2_cleaned$ARRIVAL_DELAY, 
+     main = "Relación entre DEPARTURE_DELAY y ARRIVAL_DELAY",
+     xlab = "DEPARTURE_DELAY",
+     ylab = "ARRIVAL_DELAY",
+     col = "blue", pch = 16)
+#linea de regresion
+abline(lm(dataORD2_cleaned$ARRIVAL_DELAY ~ dataORD2_cleaned$DEPARTURE_DELAY, data = dataORD2_cleaned), col = "red")
+#coeficiente de correlación en el gráfico
+text(200, 500, paste("Correlación: ", round(correlation, 2)), col = "red")
+
+##VARIABLES WEATHER VS. WEATHER DELAY (TARGET)##
+#temp
+correlation_temp <- cor(dataORD2$temp, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_temp<-ggplot(dataORD2, aes(x = temp, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of temp vs. WEATHER_DELAY",
+       x = "temp",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 0, y = 700,
+    label = paste("Correlación: ", round(correlation_temp, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+    )
+#feelslike
+correlation_feelslike <- cor(dataORD2$feelslike, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_feelslike <- ggplot(dataORD2, aes(x = feelslike, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Scatterplot of feelslike vs. WEATHER_DELAY",
+    x = "feelslike",
+    y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 0, y = 700,
+    label = paste("Correlación: ", round(correlation_feelslike, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#dew
+correlation_dew <- cor(dataORD2$dew, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_dew <- ggplot(dataORD2, aes(x = dew, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Scatterplot of dew vs. WEATHER_DELAY",
+    x = "dew",
+    y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 0, y = 700,
+    label = paste("Correlación: ", round(correlation_dew, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#humidity
+correlation_humidity <- cor(dataORD2$humidity, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_humidity <- ggplot(dataORD2, aes(x = humidity, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Scatterplot of humidity vs. WEATHER_DELAY",
+    x = "humidity",
+    y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 50, y = 750,
+    label = paste("Correlación: ", round(correlation_humidity, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#precip
+correlation_precip <- cor(dataORD2$precip, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_precip <- ggplot(dataORD2, aes(x = precip, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Scatterplot of precip vs. WEATHER_DELAY",
+    x = "precip",
+    y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 10, y = 700,
+    label = paste("Correlación: ", round(correlation_precip, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#snow
+correlation_snow <- cor(dataORD2$snow, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_snow <- ggplot(dataORD2, aes(x = snow, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(
+    title = "Scatterplot of snow vs. WEATHER_DELAY",
+    x = "snow",
+    y = "WEATHER_DELAY"
+  ) +
+  annotate(
+    "text", x = 4, y = 700,
+    label = paste("Correlación: ", round(correlation_snow, 2)),
+    color = "red"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#snowdepth
+correlation_snowdepth <- cor(dataORD2$snowdepth, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_snowdepth <- ggplot(dataORD2, aes(x = snowdepth, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of snowdepth vs. WEATHER_DELAY",
+       x = "snowdepth",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 20, y = 700,
+    label = paste("Correlación: ", round(correlation_snowdepth, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#windgust -->donde windgust es NA he puesto 0, o deberian dejarse los NA y que no aparezcan en el plot?
+dataORD2_mod<-dataORD2
+dataORD2_mod$windgust[is.na(dataORD2_mod$windgust)] <- 0
+correlation_windgust <- cor(dataORD2_mod$windgust, dataORD2_mod$WEATHER_DELAY, use = "complete.obs")
+scatterplot_windgust <- ggplot(dataORD2_mod, aes(x = windgust, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of windgust vs. WEATHER_DELAY",
+       x = "windgust",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 50, y = 750,
+    label = paste("Correlación: ", round(correlation_windgust, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#windspeed
+correlation_windspeed <- cor(dataORD2$windspeed, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_windspeed <- ggplot(dataORD2, aes(x = windspeed, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of windspeed vs. WEATHER_DELAY",
+       x = "windspeed",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 30, y = 750,
+    label = paste("Correlación: ", round(correlation_windspeed, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#cloudcover
+correlation_cloudcover <- cor(dataORD2$cloudcover, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_cloudcover <- ggplot(dataORD2, aes(x = cloudcover, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of cloudcover vs. WEATHER_DELAY",
+       x = "cloudcover",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 50, y = 750,
+    label = paste("Correlación: ", round(correlation_cloudcover, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#visibility
+correlation_visibility <- cor(dataORD2$visibility, dataORD2$WEATHER_DELAY, use = "complete.obs")
+scatterplot_visibility <- ggplot(dataORD2, aes(x = visibility, y = WEATHER_DELAY)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Scatterplot of visibility vs. WEATHER_DELAY",
+       x = "visibility",
+       y = "WEATHER_DELAY") +
+  annotate(
+    "text", x = 7, y = 750,
+    label = paste("Correlación: ", round(correlation_visibility, 2)),
+    color = "red") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 8),  # Ajusta el tamaño del título del gráfico
+    axis.title.x = element_text(size = 8),  # Ajusta el tamaño del título del eje x
+    axis.title.y = element_text(size = 8)  # Ajusta el tamaño del título del eje y
+  )
+#organizar en subplots
+grid.arrange(
+  scatterplot_temp,scatterplot_feelslike, scatterplot_dew, scatterplot_humidity,
+  scatterplot_precip, scatterplot_snow, scatterplot_snowdepth, scatterplot_windgust, 
+  scatterplot_windspeed,scatterplot_cloudcover, scatterplot_visibility,
+  ncol = 3
+)
+
+##OTROS DESCRIPTIVOS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#MEDIA DE RETRASOS AL MES
+delayed_flights <- dataORD2 %>%
+  filter(WEATHER_DELAY > 15) %>%
+  group_by(MONTH) %>%
+  summarize(num_delayed_flights = n()) #número de vuelos retrasados por clima en cada mes
+
+total_flights <- dataORD2 %>%
+  group_by(MONTH) %>%
+  summarize(num_total_flights = n()) #número total de vuelos en cada mes
+
+delayed_flights <- merge(delayed_flights, total_flights, by = "MONTH", all.x = TRUE)
+delayed_flights$mean_delay <- delayed_flights$num_delayed_flights / delayed_flights$num_total_flights 
+
+ggplot(delayed_flights, aes(x = factor(MONTH), y = mean_delay)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(title = "Media de Weather Delays por Mes",
+       x = "Mes",
+       y = "Media de Weather Delays") +
+  theme_minimal()
+
+#MEDIA DE RETRASOS AL DIA
+#número de retrasos y vuelos por día
+dataORD2 %>%
+  group_by(YEAR, MONTH, DAY) %>%
+  summarize(
+    Num_Delays = sum(WEATHER_DELAY > 15),
+    Num_Flights = n()
+  ) %>%
+  
+  mutate(Mean_Delay = Num_Delays / Num_Flights) %>% #media de retrasos
+
+  ggplot(aes(x = DAY, y = Mean_Delay)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    title = "Media de Weather Delays por día de mes",
+    x = "Día del Mes",
+    y = "Media de Retrasos"
+  )
+
+#MEDIA DE RETRASOS POR DIA DE LA SEMANA
+media_retrasos <- dataORD2 %>%
+  group_by(DAY_OF_WEEK) %>%
+  summarize(Media_Retrasos = mean(WEATHER_DELAY > 15, na.rm = TRUE))
+
+# Gráfico
+ggplot(media_retrasos, aes(x = DAY_OF_WEEK, y = Media_Retrasos)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(
+    title = "Media de Weather Delays por día de la semana",
+    x = "Día de la Semana",
+    y = "Media de Retrasos"
+  )
+
+#TOTAL DE VUELOS POR COMPAÑIA AEREA
+ggplot(dataORD2, aes(x = reorder(AIRLINE, -table(AIRLINE)[AIRLINE]))) +
+  geom_bar(fill = "skyblue") +
+  labs(
+    title = "Total de Vuelos por Compañía Aérea",
+    x = "Compañía Aérea",
+    y = "Total de Vuelos"
+  ) +
+  coord_flip() 
+
+#MEDIA DE RETRASOS POR COMPAÑIA AEREA  #-->NUMERO DE RETRASOS/NUMERO DE VUELOS
+media_retrasos <- dataORD2 %>%
+  group_by(AIRLINE) %>%
+  summarize(Media_Retrasos = mean(WEATHER_DELAY > 15, na.rm = TRUE))
+
+media_retrasos <- media_retrasos %>%
+  arrange(desc(Media_Retrasos))
+
+ggplot(media_retrasos, aes(x = reorder(AIRLINE, -Media_Retrasos), y = Media_Retrasos)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(
+    title = "Media de Weather Delays por Compañía Aérea",
+    x = "Compañía Aérea",
+    y = "Media de Weather Delays"
+  ) +
+  coord_flip()  
+
+#MEDIA DE DEPARTURE DELAY Y ARRIVAL DELAY POR COMPAÑIA AEREA
+media_salidas <- dataORD2 %>%
+  group_by(AIRLINE) %>%
+  summarize(Media_Retrasos_Salida = mean(DEPARTURE_DELAY, na.rm = TRUE))
+
+media_llegadas <- dataORD2 %>%
+  group_by(AIRLINE) %>%
+  summarize(Media_Retrasos_Llegada = mean(ARRIVAL_DELAY, na.rm = TRUE))
+
+media_retrasos <- merge(media_salidas, media_llegadas, by = "AIRLINE")
+
+# Crear un gráfico de barras apiladas con leyenda
+ggplot(media_retrasos, aes(x = AIRLINE)) +
+  geom_bar(aes(y = Media_Retrasos_Salida, fill = "Salida"), stat = "identity") +
+  geom_bar(aes(y = Media_Retrasos_Llegada, fill = "Llegada"), stat = "identity") +
+  labs(
+    title = "Media de Retrasos en Salidas y Llegadas por Compañía Aérea",
+    x = "Compañía Aérea",
+    y = "Media de Retrasos"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c("Salida" = "skyblue", "Llegada" = "orange")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  guides(fill = guide_legend(title = "Tipo de Retraso"))
+
+#RETRASOS DIARIOS+CONDICION METEOROLOGICA###
+monthly_summary <- data_filtered %>%
+  group_by(DATE, conditions) %>%
+  summarise(Num_Retrasos = n()) %>%
+  ungroup()
+
+# Grafico
+ggplot(monthly_summary, aes(x = format(DATE, "%Y-%m"), y = Num_Retrasos, fill = conditions)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set1") +
+  labs(
+    title = "Retrasos Diarios por Condición Meteorológica",
+    x = "Fecha",
+    y = "Número de Retrasos"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+#-->NOVIEMBRE; POR SEMANA DE MES; POR MES    
+data_filtered <- dataORD2 %>% filter(WEATHER_DELAY > 15)
+#retrasos diarios por condición meteorológica
+daily_summary <- data_filtered %>%
+  group_by(DATE, conditions) %>%
+  summarise(Num_Retrasos = n()) %>%
+  ungroup()
+#grafico
+ggplot(daily_summary, aes(x = DATE, y = Num_Retrasos, fill = conditions)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set1") +  # Paleta de colores
+  labs(
+    title = "Retrasos Diarios por Condición Meteorológica",
+    x = "Fecha",
+    y = "Número de Retrasos"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))  
+#por mes
+# Resumir los retrasos a nivel mensual por condición meteorológica
+monthly_summary <- data_filtered %>%
+  group_by(MONTH, conditions) %>%
+  summarise(Num_Retrasos = n()) %>%
+  ungroup()
+
+# Gráfico
+ggplot(monthly_summary, aes(x = factor(MONTH), y = Num_Retrasos, fill = conditions)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set1") +  # Paleta de colores
+  labs(
+    title = "Retrasos Mensuales por Condición Meteorológica",
+    x = "Mes",
+    y = "Número de Retrasos"
+  ) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+#FRECUENCIA DE VUELOS CON DEPARTURE_DELAY >15
+delayed_flights <- dataORD2[dataORD2$DEPARTURE_DELAY > 15, ]
+
+ggplot(delayed_flights, aes(x = DEPARTURE_DELAY)) +
+  geom_histogram(binwidth = 5, fill = "skyblue", color = "black") +
+  labs(
+    title = "Frecuencia de Vuelos con Departure Delay > 15",
+    x = "Departure Delay",
+    y = "Frecuencia"
+  )
+#FRECUENCIA DE VUELOS CON DEPARTURE DELAY
+vuelos_con_retraso <- dataORD2[!is.na(dataORD$DEPARTURE_DELAY), ]
+
+ggplot(vuelos_con_retraso, aes(x = DEPARTURE_DELAY)) +
+  geom_histogram(binwidth = 15, fill = "skyblue", color = "black") +
+  labs(
+    title = "Histograma de Frecuencia de Vuelos con Departure Delay",
+    x = "Departure Delay",
+    y = "Frecuencia"
+  )
+#DEPARTURE DELAY AND ARRIVAL DELAY BY DESTINATION AIRPORT (origin is always ORD)-->MATRIZ CALOR ORIGEN-LLEGADA Y DELAYS
+media_salidas <- dataORD2 %>%
+  group_by(DESTINATION_AIRPORT) %>%
+  summarize(Media_Retrasos_Salida = mean(DEPARTURE_DELAY, na.rm = TRUE))
+
+media_llegadas <- dataORD2 %>%
+  group_by(DESTINATION_AIRPORT) %>%
+  summarize(Media_Retrasos_Llegada = mean(ARRIVAL_DELAY, na.rm = TRUE))
+
+media_retrasos <- merge(media_salidas, media_llegadas, by = "DESTINATION_AIRPORT")
+
+ggplot(media_retrasos, aes(x = DESTINATION_AIRPORT)) +
+  geom_bar(aes(y = Media_Retrasos_Salida, fill = "Salida"), stat = "identity") +
+  geom_bar(aes(y = Media_Retrasos_Llegada, fill = "Llegada"), stat = "identity") +
+  labs(
+    title = "Media de Retrasos en Salidas y Llegadas por Aeropuerto de Destino",
+    x = "Aeropuerto de Destino",
+    y = "Media de Retrasos"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c("Salida" = "skyblue", "Llegada" = "orange")) +
+  theme(axis.text.x = element_text(size = 4, angle = 90, hjust = 1, vjust = 1)) +
+  guides(fill = guide_legend(title = "Retrasos por Destination Airport"))
+
+#DEPARTURE AND ARRIVAL DELAY BY DESTINATION AIRPORT TOP10 DELAYS
+media_salidas <- dataORD2 %>%
+  group_by(DESTINATION_AIRPORT) %>%
+  summarize(Media_Retrasos_Salida = mean(DEPARTURE_DELAY, na.rm = TRUE)) %>%
+  arrange(desc(Media_Retrasos_Salida)) %>%
+  slice(1:10)  #Selecciona las 10 primeras filas
+
+media_llegadas <- dataORD2 %>%
+  group_by(DESTINATION_AIRPORT) %>%
+  summarize(Media_Retrasos_Llegada = mean(ARRIVAL_DELAY, na.rm = TRUE)) %>%
+  arrange(desc(Media_Retrasos_Llegada)) %>%
+  slice(1:10)  #Selecciona las 10 primeras filas
+
+media_retrasos <- inner_join(media_salidas, media_llegadas, by = "DESTINATION_AIRPORT")
+
+ggplot(media_retrasos, aes(x = DESTINATION_AIRPORT)) +
+  geom_bar(aes(y = Media_Retrasos_Salida, fill = "Salida"), stat = "identity") +
+  geom_bar(aes(y = Media_Retrasos_Llegada, fill = "Llegada"), stat = "identity") +
+  labs(
+    title = "Top 10 Aeropuertos con Más Retrasos en Salidas y Llegadas",
+    x = "Aeropuerto de Destino",
+    y = "Media de Retrasos"
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = c("Salida" = "skyblue", "Llegada" = "orange")) +
+  theme(axis.text.x = element_text(size = 10, angle = 90, hjust = 1, vjust = 1)) +
+  guides(fill = guide_legend(title = "Retrasos por Destination Airport"))
+
+
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####TRANSFORMACIÓN (CONT) - CREACIÓN DE VARIABLES####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##ADVERSE CLIMATE CONDITION VARIABLE##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#correlation_temp #-0.1194072
+#correlation_feelslike #-0.1275581
+#correlation_dew #-0.0765149
+#correlation_humidity #0.1221612 --
+#correlation_precip #0.2271402 --
+#correlation_snow #0.1015545 --
+#correlation_snowdepth #0.1593664 --
+#correlation_windgust #0.0726605 --
+#correlation_windspeed #0.07212183 -- 
+#correlation_cloudcover #0.07135247 --
+#correlation_visibility #-0.207103
+
+#ver correlaciones entre las que tienen corr positiva-->correl mas alta: cloudcover vs. humidity correl 0.36-->dejarlas las 2
+variables_interes <- c("humidity", "precip", "snow", "snowdepth", "windgust", "windspeed", "cloudcover")
+datos_fe <- dataORD2[, variables_interes]
+matriz_correlacion <- cor(datos_fe)
+print(matriz_correlacion)
+
+
+variables_interes <- c("humidity", "precip", "snow", "snowdepth", "windgust", "windspeed", "cloudcover")
+datos_adv_climate <- dataORD2[, c(variables_interes, "WEATHER_DELAY")]
+str(datos_adv_climate) #ver que sean todas numericas
+# Verificar y quitar filas con datos nulos o infinitos
+datos_adv_climate <- na.omit(datos_adv_climate)
+
+#Calcular las correlaciones con weather_delay solo para las variables de interés
+correlaciones <- cor(datos_adv_climate)[, "WEATHER_DELAY", drop = FALSE]  # Excluir la correlación consigo misma
+correlaciones <- correlaciones[-length(correlaciones)]  # Eliminar la última correlación consigo misma
+
+#Asignar pesos basados en las correlaciones
+pesos <- correlaciones / sum(abs(correlaciones))
+pesos
+#Crear la nueva variable adverse_climate_condition ponderada
+dataORD2$adverse_climate_condition <- rowSums(dataORD2[, variables_interes] * pesos) #los NA vienen de windgust
+# Mostrar el conjunto de datos con la nueva variable
+print(dataORD2)
+summary(dataORD2)
+str(dataORD2)
+
+ggplot(dataORD2, aes(x = adverse_climate_condition)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  labs(title = "Distribución de adverse_climate_condition",
+       x = "adverse_climate_condition",
+       y = "Frecuencia") +
+  theme_minimal()
+
+##SEASON VARIABLE##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+dataORD2$season <- ifelse(dataORD2$MONTH %in% c(12, 1, 2), "Winter", ifelse(dataORD2$MONTH %in% c(3, 4, 5), "Spring", ifelse(dataORD2$MONTH %in% c(6, 7, 8), "Summer", "Fall")))
+dataORD2$season <- factor(dataORD2$season, levels = c("Winter", "Spring", "Summer", "Fall"))
+
+ggplot(dataORD2, aes(x = season)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribución de vuelos por estación",
+       x = "Estación",
+       y = "Número de vuelos") +
+  theme_minimal()
+
+##AVERAGE WEATHER DELAY PREVIOUS FLIGHTS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#Retraso promedio de vuelos anteriores-->calcula la media de weather_delay para vuelos anteriores agrupando por cada FLIGHT_NUMBER
+# considera todos los vuelos anteriores con el mismo número de vuelo para calcular el retraso promedio, sin un límite específico en el número de días.
+dataORD2$avg_wdelay_prev_flights <- ave(dataORD2$WEATHER_DELAY, dataORD2$FLIGHT_NUMBER, FUN = function(x) mean(x, na.rm = TRUE))
+
+ggplot(dataORD2, aes(x = avg_wdelay_prev_flights)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
+  labs(title = "Retraso meteorológico promedio de vuelos anteriores",
+       x = "avg_delay_prev_flights",
+       y = "Frecuencia") +
+  theme_minimal()
+
+plot(dataORD2$DISTANCE, dataORD2$WEATHER_DELAY,
+     xlab = "Distancia del vuelo",
+     ylab = "Weather Delay",
+     main = "Scatterplot: Distancia vs. Weather Delay",
+     col = "blue")
+
+##MOMENTO DEL DIA##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+# Crear una variable que agrupe las horas del día
+dataORD2$departure_time_category <- cut(dataORD2$SCHEDULED_DEPARTURE, 
+                                        breaks = c(-Inf, 600, 1200, 1900, Inf), 
+                                        labels = c("Madrugada", "Mañana", "Tarde", "Noche"),
+                                        include.lowest = TRUE)
+
+ggplot(dataORD2, aes(x = departure_time_category)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribución de horas de salida",
+       x = "Categoría de tiempo",
+       y = "Número de vuelos") +
+  theme_minimal()
+
+##WEATHER DELAY PER DISTANCE##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#Proporción de Weather Delay por Unidad de Distancia
+dataORD2$wdelay_per_distance <- dataORD2$WEATHER_DELAY / dataORD2$DISTANCE
+
+ggplot(dataORD2, aes(x = wdelay_per_distance)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black") +
+  labs(title = "Distribución de la Proporción de Weather Delay por Unidad de Distancia",
+       x = "Proporción de Weather Delay por Unidad de Distancia",
+       y = "Frecuencia") +
+  theme_minimal()
+
+##WEATHER DELAY PER ELAPSED TIME##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+dataORD2$wdelay_per_elapsedtime <- dataORD2$WEATHER_DELAY / dataORD2$ELAPSED_TIME
+
+ggplot(dataORD2, aes(x = ELAPSED_TIME, y = wdelay_per_elapsedtime)) +
+  geom_point(color = "blue") +
+  labs(title = "Relación entre ELAPSED_TIME y wdelay_per_elapsedtime",
+       x = "ELAPSED_TIME",
+       y = "wdelay_per_elapsedtime") +
+  theme_minimal()
+
+ggplot(dataORD2, aes(x = wdelay_per_elapsedtime)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black") +
+  labs(title = "Distribución de wdelay_per_elapsedtime",
+       x = "wdelay_per_elapsedtime",
+       y = "Frecuencia") +
+  theme_minimal()
+
+
+
+
+
+
+
+
+
+
+
+##------------------------------------------------------------------------------------------------------------------------------------------##
+####5. ANÁLISIS PREDICTIVO####
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##SELECCIÓN DE VARIABLES##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#Seleccionar variables numéricas o enteras
+numeric_variables <- dataORD2[sapply(dataORD2, function(x) is.numeric(x) || is.integer(x))]
+
+#quitar NAs
+numeric_variables_without_na <- na.omit(numeric_variables)
+
+#Centrar y escalar
+numeric_variables_scaled <- scale(numeric_variables_without_na)
+numeric_variables_scaled <- subset(numeric_variables_scaled, select = -c(YEAR))
+
+# Calcular la matriz de correlación
+correlation_matrix <- cor(numeric_variables_scaled)
+
+# Visualizar la matriz de correlación con corrplot
+corrplot(correlation_matrix, tl.cex = 0.5, method = "color", col = colorRampPalette(c("blue", "white", "red"))(10))
+
+##MATRIZ DE CORREL QUITANDO LAS DE MUCHA CORREL ENTRE ELLAS >0.4
+columnas_a_excluir <- c("SCHEDULED_ARRIVAL", "TIME", 
+                        "ARRIVAL_DELAY", "AIR_SYSTEM_DELAY", "DISTANCE", 
+                        "ELAPSED_TIME", "humidity", "windgust", "date", "dew", "snowdepth", "sealevelpressure", "temp", 
+                        "week_in_month","SCHEDULED_DEPARTURE", "feelslike", "wdelay_per_distance", "wdelay_per_elapsedtime", "cloudcover", "precipprob", "DIVERTED", "CANCELLED", "WEATHER_DELAY")
+columnas_a_mantener <- setdiff(colnames(numeric_variables_scaled), columnas_a_excluir)
+
+numeric_variables_selec <- numeric_variables_scaled[, columnas_a_mantener]
+correlation_matrix <- cor(numeric_variables_selec)
+
+# Visualizar la matriz de correlación con corrplot
+corrplot(correlation_matrix, tl.cex = 0.5, method = "color", col = colorRampPalette(c("blue", "white", "red"))(10))
+
+##DATOS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#1. DATASET CON TODAS (las correlacionadas entre si tambien)
+col_a_excl <- c("date", "YEAR")
+columnas_a_mantener <- setdiff(names(dataORD2), col_a_excl)
+dataORD2_todo <- dataORD2[, columnas_a_mantener]
+
+#2. DATASET SIN LAS CORRELACIONADAS
+library(dplyr)
+columnas_a_excluir <- c("YEAR", "FLIGHT_NUMBER", "SCHEDULED_ARRIVAL", "TIME", 
+                        "ARRIVAL_DELAY", "AIR_SYSTEM_DELAY", "DISTANCE", 
+                        "ELAPSED_TIME", "humidity", "windgust", "date", 
+                        "dew", "snowdepth", "sealevelpressure", "temp", 
+                        "week_in_month", "SCHEDULED_DEPARTURE", "feelslike", 
+                        "wdelay_per_distance", "wdelay_per_elapsedtime", "cloudcover", 
+                        "precipprob", "DIVERTED", "CANCELLED", "WEATHER_DELAY", "name", "stations")
+# Seleccionar todas las columnas excepto las que se van a excluir
+dataORD2_selecc <- select(dataORD2, -any_of(columnas_a_excluir))
+str(dataORD2_selecc)
+
+
+##GUARDAR DATOS COMO CSV##
+write.csv(dataORD2_selecc, file = "dataORD2_selecc", row.names = FALSE)
+
+##CARGAR DATOS PARA MODELOS##
+dataORD2_selecc <- read.csv("dataORD2_selecc")
+
+dataORD2_selecc$departure_time_category <- as.factor(dataORD2_selecc$departure_time_category)
+dataORD2_selecc$season <- as.factor(dataORD2_selecc$season)
+dataORD2_selecc$w_delayed <- as.factor(dataORD2_selecc$w_delayed)
+dataORD2_selecc$DATE <- as.Date(dataORD2_selecc$DATE, format = "%Y-%m-%d")
+
+str(dataORD2_selecc)
+
+
+##MODELO DE PREDICCION AL AZAR##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+set.seed(123)  # Establecer semilla para reproducibilidad
+
+# Generar predicciones aleatorias para w_delayed
+dataORD2_selecc$predicciones_aleatorias <- sample(c(0, 1), nrow(dataORD2_selecc), replace = TRUE)
+proporcion_predicciones <- prop.table(table(dataORD2_selecc$predicciones_aleatorias))
+print(proporcion_predicciones) #estan balanceadas
+
+# Evaluar el desempeño del modelo aleatorio
+# Matriz de confusión
+confusion_matrix <- table(dataORD2_selecc$w_delayed, dataORD2_selecc$predicciones_aleatorias)
+print("Matriz de Confusión:")
+print(confusion_matrix)
+# Precisión
+precision <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Precisión:", precision))
+# Sensibilidad (Recall)
+sensibilidad <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+print(paste("Sensibilidad:", sensibilidad))
+# Especificidad
+especificidad <- confusion_matrix[1, 1] / sum(confusion_matrix[1, ])
+print(paste("Especificidad:", especificidad))
+# AUC-ROC (puede requerir la instalación del paquete pROC)
+library(pROC)
+roc_obj <- roc(dataORD2_selecc$w_delayed, dataORD2_selecc$predicciones_aleatorias)
+auc_roc <- auc(roc_obj)
+print(paste("AUC-ROC:", auc_roc))
+# Dibujar la curva ROC
+plot(roc_obj, main = "Curva ROC", col = "blue", lwd = 2)
+
+dataORD2_selecc <- subset(dataORD2_selecc, select = -predicciones_aleatorias)
+
+
+##CAMBIOS NECESARIOS PARA LOS MODELOS##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#CONVERTIR A FACTOR
+dataORD2_selecc$MONTH <- factor(dataORD2_selecc$MONTH)
+dataORD2_selecc$DAY <- factor(dataORD2_selecc$DAY)
+dataORD2_selecc$DAY_OF_WEEK <- factor(dataORD2_selecc$DAY_OF_WEEK)
+dataORD2_selecc$AIRLINE <- factor(dataORD2_selecc$AIRLINE)
+dataORD2_selecc$DESTINATION_AIRPORT <- factor(dataORD2_selecc$DESTINATION_AIRPORT)
+dataORD2_selecc$ORIGIN_AIRPORT <- factor(dataORD2_selecc$ORIGIN_AIRPORT)
+dataORD2_selecc$CANCELLATION_REASON <- factor(dataORD2_selecc$CANCELLATION_REASON)
+dataORD2_selecc$preciptype <- factor(dataORD2_selecc$preciptype)
+dataORD2_selecc$conditions <- factor(dataORD2_selecc$conditions)
+dataORD2_selecc$icon <- factor(dataORD2_selecc$icon)
+
+#ELIMINAR VARIABLES FACTOR CON SOLO 1 NIVEL + la variable DATE (representado con DAY y MONTH) y timelarge
+dataORD2_selecc <- subset(dataORD2_selecc, select = -c(ORIGIN_AIRPORT, CANCELLATION_REASON, DATE, timelarge))
+
+#NUMERICAS ESCALADAS
+# Seleccionar solo las variables numéricas para estandarizar
+numeric_variables <- dataORD2_selecc[sapply(dataORD2_selecc, is.numeric)]
+# Estandarizar las variables numéricas
+scaled_numeric <- scale(numeric_variables)
+# Combinar las variables escaladas con el resto del conjunto de datos
+dataORD2_selecc <- cbind(dataORD2_selecc[, !sapply(dataORD2_selecc, is.numeric)], scaled_numeric)
+str(dataORD2_selecc)
+
+# CATEGORICAS A DUMMY EXCEPTO w_delayed
+library(caret)
+library(lattice)
+# Identificar las variables categóricas
+vars_categoricas <- sapply(dataORD2_selecc, is.factor) & 
+  !names(dataORD2_selecc) %in% c("w_delayed")
+# Convertir las variables categóricas en dummy
+dummy_dataORD2 <- dummyVars(" ~ .", data = dataORD2_selecc[, vars_categoricas])
+dataORD2_dummies <- predict(dummy_dataORD2, newdata = dataORD2_selecc[, vars_categoricas])
+# Eliminar las variables categóricas originales de dataORD2_selecc
+dataORD2_selecc_sin_categoricas <- dataORD2_selecc[, !vars_categoricas]
+# Unir los conjuntos de datos por filas
+dataORD2_selecc2 <- cbind(dataORD2_selecc_sin_categoricas, dataORD2_dummies)
+str(dataORD2_selecc2)
+
+#ASEGURAR QUE TODAS LAS VARIABLES SEAN NUMERICAS O FACTOR CON AL MENOS DOS NIVELES
+dataORD2_selecc2$AIRLINE <- factor(dataORD2_selecc2$AIRLINE)
+dataORD2_selecc2$ORIGIN_AIRPORT <- factor(dataORD2_selecc2$ORIGIN_AIRPORT)  ##
+#dataORD2_selecc2$DESTINATION_AIRPORT <- factor(dataORD2_selecc2$DESTINATION_AIRPORT)
+dataORD2_selecc2$CANCELLATION_REASON <- factor(dataORD2_selecc2$CANCELLATION_REASON)
+dataORD2_selecc2$timelarge <- factor(dataORD2_selecc2$timelarge) ##
+dataORD2_selecc2$preciptype <- factor(dataORD2_selecc2$preciptype)
+dataORD2_selecc2$conditions <- factor(dataORD2_selecc2$conditions)
+dataORD2_selecc2$icon <- factor(dataORD2_selecc2$icon)
+
+str(dataORD2_selecc2)
+
+
+#CAMBIAR NOMBRES CON PUNTO A BARRABAJA
+library(dplyr)
+
+# Renombrar la variable
+print(names(dataORD2_selecc2))
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "season.Fall"] <- "season_Fall"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "season.Spring"] <- "season_Spring"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "season.Summer"] <- "season_Summer"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "season.Winter"] <- "season_Winter"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "departure_time_category.Madrugada"] <- "departure_time_category_Madrugada"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "departure_time_category.Mañana"] <- "departure_time_category_Mañana"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "departure_time_category.Noche"] <- "departure_time_category_Noche"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "departure_time_category.Tarde"] <- "departure_time_category_Tarde"
+
+str(dataORD2_selecc2)
+
+#ver que no haya NA
+sum(is.na(dataORD2_selecc2))
+summary(dataORD2_selecc2)
+str(dataORD2_selecc2)
+
+#ver que no hay comas en vez de punto
+# Función para detectar comas en una columna numérica
+detectar_comas <- function(columna) {
+  any(grepl(",", as.character(columna)))
+}
+# Aplicar la función a cada columna numérica
+columnas_numericas <- sapply(dataORD2_selecc2, is.numeric)
+columnas_con_comas <- sapply(dataORD2_selecc2[, columnas_numericas], detectar_comas)
+# Verificar si hay alguna columna con comas
+hay_comas <- any(columnas_con_comas)
+# Mostrar el resultado
+print(hay_comas)
+
+
+##REGRESIÓN LOGÍSTICA##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##MODELO 1: SIN BALANCEO Y SIN CV##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+##SIN CROSS VALIDATION##
+set.seed(123)  # Para reproducibilidad
+indices_train <- createDataPartition(dataORD2_selecc2$w_delayed, p = 0.7, list = FALSE)
+train_selecc <- dataORD2_selecc2[indices_train, ]
+test_selecc <- dataORD2_selecc2[-indices_train, ]
+
+#####MODELO SIN TRAIN BALANCEADO Y CON VARIABLES SELECC
+modelo1 <- train(
+  w_delayed ~ .,  # Reemplazar 'TARGET_VARIABLE' con el nombre de tu variable objetivo
+  data = train_selecc,
+  method = "glm",
+  family = "binomial"
+)
+# Realizar predicciones en el conjunto de prueba
+predicciones <- predict(modelo1, newdata = test_selecc)
+# Calcular la matriz de confusión
+confusion_matrix <- confusionMatrix(predicciones, test_selecc$w_delayed)
+# Mostrar la matriz de confusión y otras métricas de evaluación
+print(confusion_matrix)
+
+
+##MODELO 2: SIN BALANCEO Y CON CV##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+##CON CROSS VALIDATION##
+set.seed(123)  # Para reproducibilidad
+# Definir el esquema de validación cruzada
+control <- trainControl(method = "cv",    # Método de validación cruzada (en este caso, k-fold cross-validation)
+                        number = 10)      # Número de folds (por ejemplo, 10-fold cross-validation)
+# Entrenar el modelo con validación cruzada
+modelo2 <- train(
+  w_delayed ~ .,                    # Fórmula del modelo
+  data = dataORD2_selecc2,          # Conjunto de datos
+  method = "glm",                   # Método de modelado (en este caso, regresión logística)
+  family = "binomial",              # Tipo de distribución de la familia (en este caso, binomial para regresión logística)
+  trControl = control               # Esquema de validación cruzada
+)
+# Ver los resultados del modelo
+print(modelo2)
+
+
+##MODELO 3: BALANCEADO SIN CV##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+prop1 <- prop.table(table(train_selecc$w_delayed))
+print(prop1)
+
+#ROSE SOLO MANEJA CONTINUAS Y CATEGORICAS
+tipos_de_datos <- sapply(train_selecc, class)
+# Filtrar solo las variables que no son continuas ni categóricas
+variables_problema <- names(tipos_de_datos)[!(tipos_de_datos %in% c("numeric", "factor"))]
+# Mostrar las variables problemáticas
+print(variables_problema)
+
+#HACER OVERSAMPLING
+install.packages("ROSE")
+library(ROSE)
+train_selecc_balanced <- ROSE(w_delayed ~ ., data = train_selecc, seed = 123)$data
+
+prop.table(table(train_selecc_balanced$w_delayed))
+
+
+library(lattice)
+library(caret)
+modelo3 <- train(
+  w_delayed ~ .,  # Reemplazar 'TARGET_VARIABLE' con el nombre de tu variable objetivo
+  data = train_selecc_balanced,
+  method = "glm",
+  family = "binomial"
+)
+# Realizar predicciones en el conjunto de prueba
+predicciones <- predict(modelo3, newdata = test_selecc)
+# Calcular la matriz de confusión
+confusion_matrix <- confusionMatrix(predicciones, test_selecc$w_delayed)
+# Mostrar la matriz de confusión y otras métricas de evaluación
+print(confusion_matrix)
+
+##MODELO 4: BALANCEADO Y CON CV##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+#ROSE SOLO MANEJA CONTINUAS Y CATEGORICAS
+tipos_de_datos <- sapply(dataORD2_selecc2, class)
+# Filtrar solo las variables que no son continuas ni categóricas
+variables_problema <- names(tipos_de_datos)[!(tipos_de_datos %in% c("numeric", "factor"))]
+# Mostrar las variables problemáticas
+print(variables_problema)
+
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "preciptype.No precip"] <- "preciptype.No_precip"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "preciptype.rain,snow"] <- "preciptype.rain_snow"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Partially cloudy"] <- "conditions.Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Rain, Overcast"] <- "conditions.Rain_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Rain, Partially cloudy"] <- "conditions.Rain_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Overcast"] <- "conditions.Snow_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Partially cloudy"] <- "conditions.Snow_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Rain, Overcast"] <- "conditions.Snow_Rain_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Rain, Partially cloudy"] <- "conditions.Snow_Rain_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.clear-day"] <- "icon.clear_day"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.clear-night"] <- "icon.clear_night"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.partly-cloudy-day"] <- "icon.partly_cloudy_day"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.partly-cloudy-night"] <- "icon.partly_cloudy_night"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.partly-cloudy-night"] <- "icon.partly_cloudy_night"
+
+
+
+library(ROSE)
+library(caret)
+set.seed(123)  # Para reproducibilidad
+
+# Definir el esquema de validación cruzada con balanceo
+control <- trainControl(method = "cv",              # Método de validación cruzada (en este caso, k-fold cross-validation)
+                        number = 3,                 # Número de folds (por ejemplo, 10-fold cross-validation)
+                        sampling = "rose")          # Método de balanceo de datos (en este caso, ROSE)       
+
+# Entrenar el modelo con validación cruzada y balanceo de datos
+modelo <- train(
+  w_delayed ~ .,                    # Fórmula del modelo
+  data = dataORD2_selecc2,          # Conjunto de datos
+  method = "glm",                   # Método de modelado (en este caso, regresión logística)
+  family = "binomial",              # Tipo de distribución de la familia (en este caso, binomial para regresión logística)
+  trControl = control               # Esquema de validación cruzada con balanceo de datos
+)
+# Ver los resultados del modelo
+print(modelo)
+
+
+summary(dataORD2_selecc2)
+
+
+##REGRESION LOGISTICA CON CV Y OVERSAMPLING, CON ROC##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+library(pROC)
+# Filtrar y renombrar columnas problemáticas
+tipos_de_datos <- sapply(dataORD2_selecc2, class)
+variables_problema <- names(tipos_de_datos)[!(tipos_de_datos %in% c("numeric", "factor"))]
+print(variables_problema)
+
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "preciptype.No precip"] <- "preciptype.No_precip"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "preciptype.rain,snow"] <- "preciptype.rain_snow"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Partially cloudy"] <- "conditions.Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Rain, Overcast"] <- "conditions.Rain_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Rain, Partially cloudy"] <- "conditions.Rain_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Overcast"] <- "conditions.Snow_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Partially cloudy"] <- "conditions.Snow_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Rain, Overcast"] <- "conditions.Snow_Rain_Overcast"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "conditions.Snow, Rain, Partially cloudy"] <- "conditions.Snow_Rain_Partially_cloudy"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.clear-day"] <- "icon.clear_day"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.clear-night"] <- "icon.clear_night"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.partly-cloudy-day"] <- "icon.partly_cloudy_day"
+colnames(dataORD2_selecc2)[colnames(dataORD2_selecc2) == "icon.partly-cloudy-night"] <- "icon.partly_cloudy_night"
+
+
+dataORD2_selecc2$w_delayed <- factor(dataORD2_selecc2$w_delayed)
+levels(dataORD2_selecc2$w_delayed) <- make.names(levels(dataORD2_selecc2$w_delayed))
+levels(dataORD2_selecc2$w_delayed) <- c("X1", "X0")
+
+set.seed(123)  # Para reproducibilidad
+
+# Definir el esquema de validación cruzada con balanceo
+control <- trainControl(
+  method = "cv",               # Método de validación cruzada
+  number = 3,                 # Número de folds
+  sampling = "rose",           # Método de balanceo de datos
+  verboseIter = TRUE,          # Mostrar el progreso
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary, # Resumen para clasificación binaria
+  savePredictions = "final"    # Guardar las predicciones finales
+)
+
+# Entrenar el modelo con validación cruzada y balanceo de datos
+modelo <- train(
+  w_delayed ~ .,               # Fórmula del modelo
+  data = dataORD2_selecc2,     # Conjunto de datos
+  method = "glm",              # Método de modelado (regresión logística)
+  family = "binomial",         # Distribución binomial para regresión logística
+  trControl = control,         # Esquema de validación cruzada con balanceo de datos
+  metric = "ROC"               # Métrica de evaluación
+)
+
+# Ver los resultados del modelo
+print(modelo)
+
+# Curva ROC
+predicciones <- modelo$pred
+roc_obj <- roc(predicciones$obs, predicciones$X1, levels = rev(levels(predicciones$obs)))
+print(roc_obj)
+plot(roc_obj, main = "Curva ROC para el modelo de Regresión Logística")
+
+# Calcular y mostrar la matriz de confusión y la precisión
+conf_matrix <- confusionMatrix(predicciones$pred, predicciones$obs)
+print(conf_matrix)
+
+# Mostrar la precisión
+accuracy <- conf_matrix$overall['Accuracy']
+print(paste("Precisión del modelo: ", round(accuracy, 4)))
+
+# Importancia de las variables
+# Obtener los coeficientes del modelo desde summary
+coeficientes <- summary(modelo$finalModel)$coefficients
+
+# Convertir a dataframe y añadir la columna de nombres de variables
+coef_df <- data.frame(Variable = rownames(coeficientes), coeficientes)
+
+# Ordenar por valor absoluto del coeficiente
+coef_df <- coef_df[order(abs(coef_df$Estimate), decreasing = TRUE), ]
+
+# Seleccionar los 10 coeficientes con mayor valor absoluto
+top_coef_df <- head(coef_df, 30)
+
+# Graficar los coeficientes
+library(ggplot2)
+ggplot(top_coef_df, aes(x = reorder(Variable, Estimate), y = Estimate)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top 20 Variables por Importancia en el Modelo de Regresión Logística",
+       x = "Variable", y = "Coeficiente") +
+  theme_minimal()
+
+
+
+
+
+
+##MODELOS DE RANDOM FOREST##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+
+##RANDOM FOREST CON CV Y OVERSAMPLING, SIN ROC## 
+##------------------------------------------------------------------------------------------------------------------------------------------##
+dataORD2_rf <- dataORD2_selecc %>%
+  select_if(is.numeric) %>%
+  bind_cols(dataORD2_selecc %>% select(w_delayed))
+
+str(dataORD2_rf)
+
+library(caret)
+control <- trainControl(method = "cv",              # Método de validación cruzada (en este caso, k-fold cross-validation)
+                        number = 15,                 # Número de folds (por ejemplo, 5-fold cross-validation)
+                        sampling = "rose",  # Método de balanceo de datos (en este caso, ROSE)
+                        verboseIter = TRUE)                 
+# Ajustar el modelo Random Forest con validación cruzada y ROSE
+modelo_rf <- train(w_delayed ~ .,                         # Fórmula del modelo
+                   data = dataORD2_rf,               # Conjunto de datos
+                   method = "rf",                         # Método de modelado (Random Forest)
+                   trControl = control)                   # Esquema de validación cruzada
+
+# Mostrar el modelo ajustado
+print(modelo_rf)
+
+
+
+##RANDOM FOREST CON CV Y OVERSAMPLING, CON ROC##
+##------------------------------------------------------------------------------------------------------------------------------------------##
+dataORD2_rf <- dataORD2_selecc %>%
+  select_if(is.numeric) %>%
+  bind_cols(dataORD2_selecc %>% select(w_delayed))
+
+dataORD2_rf$w_delayed <- factor(dataORD2_rf$w_delayed)
+levels(dataORD2_rf$w_delayed) <- make.names(levels(dataORD2_rf$w_delayed))
+levels(dataORD2_rf$w_delayed) <- c("X1", "X0")
+
+str(dataORD2_rf)
+
+library(caret)
+library(pROC)
+control <- trainControl(method = "cv",
+                        number = 20,
+                        sampling = "rose",
+                        verboseIter = TRUE,
+                        classProbs = TRUE,
+                        summaryFunction = twoClassSummary,
+                        savePredictions = "final")             
+# Ajustar el modelo Random Forest con validación cruzada y ROSE
+modelo_rf <- train(w_delayed ~ .,
+                   data = dataORD2_rf,
+                   method = "rf",
+                   trControl = control,
+                   metric = "ROC")
+print(modelo_rf)
+
+#curva ROC
+predicciones <- modelo_rf$pred
+roc_obj <- roc(predicciones$obs, predicciones$X1, levels = rev(levels(predicciones$obs)))
+print(roc_obj)
+plot(roc_obj, main = "Curva ROC para el modelo Random Forest")
+
+# Calcular y mostrar la matriz de confusión y la precisión
+conf_matrix <- confusionMatrix(predicciones$pred, predicciones$obs)
+print(conf_matrix)
+
+# Mostrar la precisión
+accuracy <- conf_matrix$overall['Accuracy']
+print(paste("Precisión del modelo: ", round(accuracy, 4)))
+
+# Importancia de las variables
+# Obtener la importancia de las variables
+importancia_var <- varImp(modelo_rf, scale = FALSE)
+importancia_var_df <- as.data.frame(importancia_var$importance)
+importancia_var_df$Variable <- rownames(importancia_var_df)
+
+# Ordenar por importancia y seleccionar las 20 variables más importantes
+importancia_var_df <- importancia_var_df[order(importancia_var_df$Overall, decreasing = TRUE), ]
+top_importancia_var_df <- head(importancia_var_df, 30)
+
+# Graficar las  variables más importantes
+ggplot(top_importancia_var_df, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top Variables por Importancia en el Modelo Random Forest",
+       x = "Variable", y = "Importancia") +
+  theme_minimal()
+
